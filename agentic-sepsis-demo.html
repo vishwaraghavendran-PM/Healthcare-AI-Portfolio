@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Agentic Sepsis Demo — Vishwa</title>
+<style>
+  :root{--bg:#f7fafc;--card:#fff;--muted:#6b7280;--accent:#0c5db9}
+  body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);margin:0;padding:28px;color:#111}
+  .wrap{max-width:900px;margin:0 auto}
+  header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+  h1{font-size:20px;margin:0}
+  p.subtitle{margin:0;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:1fr 360px;gap:18px}
+  .card{background:var(--card);padding:16px;border-radius:10px;box-shadow:0 6px 18px rgba(15,23,42,0.06)}
+  label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px}
+  input[type=number], button, select{width:100%;padding:10px;border-radius:8px;border:1px solid #e6e9ef;font-size:14px}
+  .controls{display:flex;gap:8px;margin-top:10px}
+  button.primary{background:var(--accent);color:#fff;border:0}
+  .log{height:260px;overflow:auto;background:#0f1724;color:#d1fae5;padding:10px;border-radius:8px;font-family:monospace;font-size:13px}
+  .plan{background:#fff7ed;border-left:4px solid #f59e0b;padding:10px;border-radius:6px;font-size:14px}
+  .small{font-size:13px;color:var(--muted);margin-top:8px}
+  .status{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+  .pill{padding:6px 10px;border-radius:999px;background:#eef2ff;color:#3730a3;font-weight:600;font-size:13px}
+  footer{margin-top:20px;color:var(--muted);font-size:13px;text-align:center}
+  .muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Agentic Sepsis Demo</h1>
+      <p class="subtitle">Toy risk model + agent that reasons, notifies, monitors, and escalates.</p>
+    </div>
+    <div class="status">
+      <div class="pill" id="agent-state">Idle</div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <h3>Vitals Input</h3>
+      <div style="display:grid;gap:8px;margin-top:8px">
+        <div>
+          <label>Heart Rate (bpm)</label>
+          <input id="heart" type="number" value="92" min="30" max="220" />
+        </div>
+        <div>
+          <label>Respiratory Rate (breaths / min)</label>
+          <input id="resp" type="number" value="20" min="6" max="60" />
+        </div>
+        <div>
+          <label>Temperature (°C)</label>
+          <input id="temp" type="number" step="0.1" value="38.1" />
+        </div>
+        <div>
+          <label>Lactate (mmol/L)</label>
+          <input id="lactate" type="number" step="0.1" value="2.3" />
+        </div>
+
+        <div class="controls">
+          <button id="stepBtn">Step</button>
+          <button id="randBtn">Generate Random Vitals</button>
+          <button id="startBtn" class="primary">Start Simulation</button>
+          <button id="stopBtn">Stop</button>
+        </div>
+
+        <div class="controls">
+          <button id="ackBtn">Acknowledge Alert (clinician)</button>
+          <button id="resetBtn">Reset Agent</button>
+        </div>
+
+        <p class="small">Model formula, thresholds, and timings are visible in the agent log for transparency.</p>
+      </div>
+    </section>
+
+    <aside>
+      <div class="card" style="margin-bottom:12px">
+        <h4>Action Plan</h4>
+        <div id="actionPlan" class="plan">No actions yet.</div>
+        <div class="small" style="margin-top:8px">Agent will send alert if risk ≥ <strong id="thresholdLabel">0.28</strong>.</div>
+      </div>
+
+      <div class="card">
+        <h4>Agent Log</h4>
+        <div id="log" class="log"></div>
+      </div>
+    </aside>
+  </div>
+
+  <footer>
+    <div class="muted">Demo for portfolio: not for clinical use. Tune thresholds and workflows before production.</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  // --- Configurable parameters ---
+  const ALERT_THRESHOLD = 0.28;         // risk above which agent creates an action plan
+  const ESCALATION_DELAY_MS = 9000;     // time to wait for ACK before escalating (9s for demo)
+  const MONITOR_INTERVAL_MS = 4000;     // automated vitals polling interval during simulation
+  // -------------------------------
+
+  const heartEl = document.getElementById('heart');
+  const respEl = document.getElementById('resp');
+  const tempEl  = document.getElementById('temp');
+  const lactateEl = document.getElementById('lactate');
+
+  const stepBtn = document.getElementById('stepBtn');
+  const randBtn = document.getElementById('randBtn');
+  const startBtn= document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const ackBtn  = document.getElementById('ackBtn');
+  const resetBtn= document.getElementById('resetBtn');
+
+  const logEl = document.getElementById('log');
+  const actionPlanEl = document.getElementById('actionPlan');
+  const statePill = document.getElementById('agent-state');
+  const thresholdLabel = document.getElementById('thresholdLabel');
+  thresholdLabel.textContent = ALERT_THRESHOLD.toFixed(2);
+
+  let simInterval = null;
+  let escalationTimer = null;
+  let agent = createAgent(ALERT_THRESHOLD);
+
+  // Logging helper
+  function log(msg){
+    const t = new Date().toLocaleTimeString();
+    const line = `[${t}] ${msg}`;
+    const node = document.createElement('div');
+    node.textContent = line;
+    logEl.appendChild(node);
+    logEl.scrollTop = logEl.scrollHeight;
+    // keep a short history
+    if (logEl.childNodes.length > 200) logEl.removeChild(logEl.firstChild);
+  }
+
+  // Random vitals generator (clinically plausible-ish ranges)
+  function generateRandomVitals(){
+    const hr = randInt(70, 140);
+    const rr = randInt(12, 30);
+    const temp = (Math.random() * 1.6) + 36.6; // ~36.6 - 38.2
+    const lact = +(1 + Math.random() * 3).toFixed(2); // ~1.0 - 4.0
+    heartEl.value = hr; respEl.value = rr; tempEl.value = temp.toFixed(1); lactateEl.value = lact;
+  }
+  function randInt(a,b){return Math.floor(Math.random()*(b-a+1))+a;}
+
+  // Toy risk model (same logic as the notebook formula)
+  function computeRisk(v){
+    const score =
+      (v.heart_rate - 70) * 0.002 +
+      (v.resp_rate - 12) * 0.01 +
+      (v.temp - 37) * 0.05 +
+      (v.lactate - 1.2) * 0.1;
+    return Math.max(0, Math.min(1, score));
+  }
+
+  // Agent factory
+  function createAgent(threshold){
+    return {
+      threshold,
+      alertSent: false,
+      escalationSent: false,
+      acknowledged: false,
+      lastPlan: null
+    };
+  }
+
+  // Agent observe & act
+  function agentCycle(){
+    const vitals = {
+      heart_rate: Number(heartEl.value),
+      resp_rate: Number(respEl.value),
+      temp: Number(tempEl.value),
+      lactate: Number(lactateEl.value)
+    };
+    const risk = computeRisk(vitals);
+    log(`Observed vitals=${JSON.stringify(vitals)}, risk=${risk.toFixed(3)}`);
+
+    if (risk >= agent.threshold){
+      log('Risk above threshold → agent evaluates escalation criteria.');
+      const plan = [
+        "Recommend lactate test",
+        "Re-check vitals in 15 minutes (simulated)",
+        "Notify on-duty clinician with structured note"
+      ];
+      agent.lastPlan = plan;
+      actionPlanEl.textContent = plan.join(' · ');
+      // send alert if not already
+      if (!agent.alertSent){
+        sendAlert(plan, vitals, risk);
+      } else {
+        log('Alert already sent. Monitoring for ACK or escalation.');
+      }
+    } else {
+      actionPlanEl.textContent = 'No actions. Continue monitoring.';
+      log('Risk below threshold → continue monitoring.');
+    }
+  }
+
+  function sendAlert(plan, vitals, risk){
+    agent.alertSent = true;
+    agent.acknowledged = false;
+    agent.escalationSent = false;
+    statePill.textContent = 'Alert Sent';
+    statePill.style.background = '#fff0f6';
+    statePill.style.color = '#9f1239';
+    log('Sending clinician alert: structured note with top risk factors.');
+    log(`[ACTION PLAN] ${plan.join(' | ')} — risk=${risk.toFixed(3)}`);
+    // start escalation timer (demo uses short time)
+    if (escalationTimer) clearTimeout(escalationTimer);
+    escalationTimer = setTimeout(()=> {
+      if (!agent.acknowledged && !agent.escalationSent){
+        log('No clinician ACK received → escalating to senior clinician.');
+        agent.escalationSent = true;
+        statePill.textContent = 'Escalated';
+        statePill.style.background = '#fff7ed';
+        statePill.style.color = '#92400e';
+      }
+    }, ESCALATION_DELAY_MS);
+  }
+
+  // Acknowledge handler (simulate clinician)
+  function acknowledge(){
+    if (!agent.alertSent){
+      log('No active alert to acknowledge.');
+      return;
+    }
+    agent.acknowledged = true;
+    agent.alertSent = false;
+    agent.escalationSent = false;
+    if (escalationTimer) clearTimeout(escalationTimer);
+    statePill.textContent = 'Acknowledged';
+    statePill.style.background = '#ecfdf5';
+    statePill.style.color = '#065f46';
+    log('Clinician acknowledged alert. Agent will monitor for stabilization.');
+    // Agent can clear last plan after ACK
+    setTimeout(()=> {
+      actionPlanEl.textContent = 'Monitoring after ACK. No active actions.';
+      statePill.textContent = 'Monitoring';
+      statePill.style.background = '';
+      statePill.style.color = '';
+    }, 1200);
+  }
+
+  function resetAgent(){
+    if (escalationTimer) clearTimeout(escalationTimer);
+    agent = createAgent(ALERT_THRESHOLD);
+    actionPlanEl.textContent = 'No actions yet.';
+    statePill.textContent = 'Idle';
+    statePill.style.background = '';
+    statePill.style.color = '';
+    log('Agent reset to Idle state.');
+  }
+
+  // UI bindings
+  stepBtn.addEventListener('click', ()=> agentCycle());
+  randBtn.addEventListener('click', ()=> generateRandomVitals());
+  startBtn.addEventListener('click', ()=> {
+    if (simInterval) { log('Simulation already running.'); return; }
+    log('Starting automated simulation (vitals every ' + (MONITOR_INTERVAL_MS/1000) + 's).');
+    simInterval = setInterval(()=> {
+      generateRandomVitals();
+      agentCycle();
+    }, MONITOR_INTERVAL_MS);
+    statePill.textContent = 'Running';
+    statePill.style.background = '#ecfeff';
+    statePill.style.color = '#065f46';
+  });
+  stopBtn.addEventListener('click', ()=> {
+    if (simInterval) {
+      clearInterval(simInterval);
+      simInterval = null;
+      log('Simulation stopped.');
+      statePill.textContent = 'Stopped';
+      statePill.style.background = '';
+      statePill.style.color = '';
+    } else {
+      log('No simulation running.');
+    }
+  });
+  ackBtn.addEventListener('click', ()=> acknowledge());
+  resetBtn.addEventListener('click', ()=> resetAgent());
+
+  // initial sample
+  log('Agentic Sepsis Demo loaded. Configure vitals or start simulation.');
+  generateRandomVitals();
+
+})();
+</script>
+</body>
+</html>
