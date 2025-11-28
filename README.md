@@ -12,3 +12,6 @@ This repository contains an end-to-end AI product case study demonstrating how e
 
 ## Purpose
 Showcase the full lifecycle of an AI healthcare product designed for clinical decision support.
+
+## Demo URL
+https://vishwaraghavendran-pm.github.io/Healthcare-AI-Portfolio/demos/agentic-sepsis-demo.html
